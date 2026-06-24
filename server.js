@@ -9,6 +9,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const url = require("url");
+const crypto = require("crypto");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -25,6 +26,28 @@ const REQUESTS = [
   { id: 2, owner: "bob", amount: 120.0, category: "Equipment", description: "USB-C dock", status: "Pending" },
   { id: 3, owner: "alice", amount: 18.0, category: "Meals", description: "Team lunch", status: "Approved" },
 ];
+
+const SESSIONS = new Map();
+
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+  const cookies = {};
+
+  header.split(";").forEach(part => {
+    const [name, ...rest] = part.trim().split("=");
+    if (!name) return;
+    cookies[name] = decodeURIComponent(rest.join("="));
+  });
+
+  return cookies;
+}
+
+function getSession(req) {
+  const cookies = parseCookies(req);
+  const sessionId = cookies.sessionId;
+  if (!sessionId) return null;
+  return SESSIONS.get(sessionId) || null;
+}
 
 const MIME = { ".html": "text/html", ".js": "application/javascript", ".css": "text/css" };
 
@@ -80,7 +103,22 @@ const server = http.createServer((req, res) => {
       if (!user || user.password !== password) {
         return send(res, 401, { error: "Invalid credentials" });
       }
-      return send(res, 200, { username, role: user.role, name: user.name });
+      const sessionId = crypto.randomBytes(32).toString("hex");
+
+      SESSIONS.set(sessionId, {
+        username,
+        role: user.role,
+        name: user.name
+      });
+
+      return send(
+        res,
+        200,
+        { username, role: user.role, name: user.name },
+        {
+          "Set-Cookie": `sessionId=${sessionId}; HttpOnly; SameSite=Lax; Path=/`
+        }
+      );
     });
   }
 
@@ -112,9 +150,15 @@ const server = http.createServer((req, res) => {
   const decisionMatch = pathname.match(/^\/api\/requests\/(\d+)\/decision$/);
   if (req.method === "POST" && decisionMatch) {
     return readBody(req, body => {
-      const { decision, actingRole } = body;
+      const { decision } = body;
 
-      if (actingRole !== "manager") {
+      const session = getSession(req);
+
+      if (!session) {
+        return send(res, 401, { error: "Not logged in" });
+      }
+
+      if (session.role !== "manager") {
         return send(res, 403, { error: "Only managers can approve or reject requests" });
       }
 
